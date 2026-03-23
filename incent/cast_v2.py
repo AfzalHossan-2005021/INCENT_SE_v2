@@ -614,7 +614,7 @@ def pairwise_align_cast_v2(
     print(f"[CASTv2] SEOT EM: rho_A={rho_A_use:.3f}  rho_B={rho_B_use:.3f}")
 
     print("[CASTv2] Stage 4: SEOT EM ...")
-    pi, R_em, t_em, history = seot_em(
+    pi, R_em, t_em, history, scale_ratio_em = seot_em(
         M_bio=M_bio,
         coords_A=coords_A_filt,
         coords_B=coords_B_filt,
