@@ -256,8 +256,6 @@ def lo_ransac_refine(
     if tree_B is None:
         tree_B = BallTree(coords_B)
 
-    from seot_helpers import _weighted_procrustes_all
-
     R, t = R_init.copy(), t_init.copy()
     prev_score = -np.inf
 

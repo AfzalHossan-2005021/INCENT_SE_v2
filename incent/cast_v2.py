@@ -138,7 +138,7 @@ def compute_multiscale_descriptors_v2(
         return freq_desc
 
     # ── LRF descriptor ────────────────────────────────────────────────────
-    from lrf import compute_lrf_descriptors, combine_descriptors
+    from .lrf import compute_lrf_descriptors, combine_descriptors
 
     lrf_desc = compute_lrf_descriptors(
         adata, radii=radii, cell_types=cell_types,
@@ -243,7 +243,7 @@ def find_candidate_pairs_v2(
     # ── LRF reflection screening ──────────────────────────────────────────
     if (reflection_screen and lrf_A is not None and lrf_B is not None
             and len(pair_i) > 0):
-        from lrf import (reflection_screen_precise, reflection_screen)
+        from .lrf import (reflection_screen_precise, reflection_screen)
 
         n_before = len(pair_i)
         if (n_angle_bins is not None and n_types is not None
@@ -412,8 +412,8 @@ def pairwise_align_cast_v2(
     Same as pairwise_align_cast.
     """
     import ot as pot
-    from seot import seot_em, weighted_procrustes
-    from core import _preprocess, _to_np
+    from .seot import seot_em
+    from .core import _preprocess, _to_np
 
     start_time = time.time()
     os.makedirs(filePath, exist_ok=True)
@@ -460,7 +460,7 @@ def pairwise_align_cast_v2(
 
     # Also get the LRF-only descriptors for reflection screening
     if use_lrf:
-        from lrf import compute_lrf_descriptors
+        from .lrf import compute_lrf_descriptors
         lrf_A_only = compute_lrf_descriptors(
             sliceA, radii=radii, cell_types=shared_ct,
             n_angle_bins=n_angle_bins,
@@ -507,7 +507,7 @@ def pairwise_align_cast_v2(
     # ==================================================================
     if use_magsac:
         print("[CASTv2] Stage 3: MAGSAC + LO-RANSAC SE(2) estimation ...")
-        from robust_se2 import ransac_se2_magsac
+        from .robust_se2 import ransac_se2_magsac
         R_ransac, t_ransac, n_inliers, inlier_mask = ransac_se2_magsac(
             pair_i, pair_j, pair_sc,
             coords_A_raw, coords_B_raw,
@@ -520,7 +520,7 @@ def pairwise_align_cast_v2(
             verbose=gpu_verbose)
     else:
         print("[CASTv2] Stage 3: Standard RANSAC SE(2) ...")
-        from cast import ransac_se2 as _ransac_orig
+        from .cast import ransac_se2 as _ransac_orig
         R_ransac, t_ransac, n_inliers, inlier_mask = _ransac_orig(
             pair_i, pair_j, pair_sc,
             coords_A_raw, coords_B_raw,
@@ -542,7 +542,7 @@ def pairwise_align_cast_v2(
     print("[CASTv2] Stage 4: Building M_bio ...")
 
     if cross_timepoint:
-        from cvae import INCENT_cVAE, train_cvae, latent_cost
+        from .cvae import INCENT_cVAE, train_cvae, latent_cost
         if cvae_model is not None:
             model = cvae_model
         elif cvae_path is not None and os.path.exists(cvae_path):
@@ -574,14 +574,14 @@ def pairwise_align_cast_v2(
     n_A, n_B = sA_filt.shape[0], sB_filt.shape[0]
 
     if cross_timepoint:
-        from cvae import latent_cost
+        from .cvae import latent_cost
         M1_np = latent_cost(sA_filt, sB_filt, model).astype(np.float32)
     else:
         M1_np = _to_np(p["cosine_dist_gene_expr"]).astype(np.float32)
 
     M2_np = _to_np(p["M2"]).astype(np.float32)
 
-    from topology import compute_fingerprints, fingerprint_cost
+    from .topology import compute_fingerprints, fingerprint_cost
     fp_A = compute_fingerprints(sA_filt, radius=radius, n_bins=16,
                                  cache_path=filePath,
                                  slice_name=f"{sliceA_name or 'A'}_cast2",
@@ -599,7 +599,7 @@ def pairwise_align_cast_v2(
     coords_A_filt = sA_filt.obsm["spatial"].astype(np.float64)
     coords_B_filt = sB_filt.obsm["spatial"].astype(np.float64)
 
-    from partial_ot import auto_rho_from_geometry
+    from .partial_ot import auto_rho_from_geometry
     rho_A_geo, rho_B_geo = auto_rho_from_geometry(
         coords_A_filt, coords_B_filt, base_rho=base_rho)
 
@@ -647,7 +647,7 @@ def pairwise_align_cast_v2(
             coords_B_filt.max(axis=0) - coords_B_filt.min(axis=0))) + 1e-6
         sm_sigma  = smoothing_sigma_frac * diam_B_f
 
-        from partial_ot import iterative_overlap_fugw
+        from .partial_ot import iterative_overlap_fugw
         pi, f_A, f_B = iterative_overlap_fugw(
             D_A_np, D_B_np,
             M_bio.astype(np.float64),
@@ -671,7 +671,7 @@ def pairwise_align_cast_v2(
         D_A_np = _to_np(p["D_A"])
         D_B_np_cur = _to_np(p["D_B"])
         for bcd_round in range(1, n_bcd_rounds + 1):
-            from lddmm import estimate_deformation, deformed_distances
+            from .lddmm import estimate_deformation, deformed_distances
             phi = estimate_deformation(
                 pi, coords_A_filt, coords_B_filt,
                 sigma_v=sigma_v, lambda_v=lambda_v,
