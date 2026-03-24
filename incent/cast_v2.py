@@ -715,5 +715,6 @@ def pairwise_align_cast_v2(
             "pi_mass": pi_mass, "sliceA_aligned": sliceA_aligned,
             "ransac_R": R_ransac, "ransac_t": t_ransac,
             "residual_history": history, "phi": phi,
+            "seot_scale_ratio": scale_ratio_em,
         }
     return pi

@@ -1,68 +1,4 @@
-"""
-seot.py  SE(2)-OT EM: Explicit Transformation Recovery via OT
-==============================================================
-This module solves the problem that FGW / GW fundamentally CANNOT solve:
-recovering the rigid SE(2) transformation (rotation R + translation t)
-that maps sliceA into sliceB's coordinate frame.
-
-Why GW cannot recover the transformation
------------------------------------------
-GW minimises  sum_{ijkl} pi_ij pi_kl (D_A[i,k] - D_B[j,l])^2
-using pairwise DISTANCES. Distances are rotation-invariant, so R is invisible
-to the GW objective. After GW, the centroid-based translation is a heuristic
-that fails when:
-  - Both slices are partial (centroids don't correspond to same location)
-  - Either slice contains extra symmetric regions
-  - Slices are from different timepoints with shifted coordinate frames
-
-The correct objective
------------------------
-E(pi, R, t) = (1-alpha) * sum_ij pi_ij * M_bio[i,j]
-            +    alpha  * sum_ij pi_ij * ||R*x_i + t - y_j||^2 / D^2
-            + KL(pi*1 || rho_A * a) + KL(pi^T*1 || rho_B * b)
-
-where x_i are coordinates of cell i in sliceA, y_j in sliceB.
-The second term EXPLICITLY contains R and t  ->  they are jointly optimised.
-
-EM structure (alternating minimisation)
-----------------------------------------
-E-step (OT)    fix (R, t) -> find pi* via unbalanced Sinkhorn OT
-               Cost[i,j] = (1-alpha)*M_bio[i,j] + alpha*||R*x_i+t-y_j||^2/D^2
-
-M-step (SE(2)) fix pi     -> find (R*, t*) via weighted Procrustes (closed form)
-               x_bar = sum_ij pi_ij x_i / Z         (pi-weighted centroid of A)
-               y_bar = sum_ij pi_ij y_j / Z         (pi-weighted centroid of B)
-               H = (x - x_bar)^T @ pi @ (y - y_bar)   shape (2, 2)
-               U, S, V^T = SVD(H)
-               R = V diag(1, det(V @ U^T)) @ U^T    (guaranteed rotation)
-               t = y_bar - R @ x_bar
-
-Each step strictly decreases E  ->  guaranteed convergence.
-
-Initialisation via BISPA community matching
---------------------------------------------
-The EM converges to the GLOBAL optimum only when started near the right basin.
-For bilateral symmetry, the two basins (left / right hemisphere) have nearly
-identical energies. We use BISPA community matching to:
-  1. Identify matched community pairs (k_A, k_B).
-  2. Compute R0 via Fourier-Mellin on matched cells only.
-  3. Compute t0 from matched-community centroid offsets.
-This provides an initialisation that breaks symmetry before EM starts.
-
-Generalisation
----------------
-  - Same-timepoint: M_bio = expression cosine + cell-type penalty + topology
-  - Cross-timepoint: M_bio = cVAE latent cosine + topology
-  - Any organ: BISPA community K determined adaptively
-  - Any partial overlap: rho_A and rho_B set from matched fractions
-
-Public API
-----------
-weighted_procrustes(pi, coords_A, coords_B) -> (R, t, residual)
-build_spatial_cost(R, t, coords_A, coords_B, D_normalise) -> (n_A, n_B) array
-seot_em_step(pi, M_bio, coords_A, coords_B, alpha, rho_A, rho_B, reg_sinkhorn, D)
-pairwise_align_seot(sliceA, sliceB, ...)
-"""
+"""SE(2)-OT EM alignment with explicit rigid transform recovery."""
 
 import os
 import time
@@ -466,6 +402,9 @@ def _initialise_from_bispa(
         "unmatched_A": unmatched_A, "unmatched_B": unmatched_B,
         "s_A": s_A, "s_B": s_B,
         "theta_init": theta_ref, "pose_score": pose_score,
+        "community_similarity": S,
+        "community_labels_A": comms_A,
+        "community_labels_B": comms_B,
     }
 
     if verbose:
@@ -786,41 +725,63 @@ def pairwise_align_seot(
     # sigma = sliceA's median radius (how spread out A is). B cells at distance
     # > 2*sigma from A's centroid get weight exp(-2) ≈ 0.14x, at 3*sigma get 0.01x.
     #
-    # This is GENERAL: works for brain (2 hemispheres), heart (4 chambers),
-    # liver (5 lobes), any organ, any K. No community detection needed.
+    # This is GENERAL: works for any organ with repeated regions, any K.
+    # No organ-specific geometry is assumed.
     # The rho_B marginal relaxation then allows the plan to shed the
     # down-weighted B cells entirely.
-    coords_A_rough_full = sliceA_rough.obsm["spatial"].astype(np.float64)
-    coords_B_full       = sliceB.obsm["spatial"].astype(np.float64)
-    centroid_A_rough    = np.median(coords_A_rough_full, axis=0)
-    # sigma = median distance from sliceA centroid to A cells (robust A radius)
-    sigma_bias          = float(np.median(
-        np.linalg.norm(coords_A_rough_full - centroid_A_rough, axis=1))) + 1e-6
-    # Distance from each B cell to sliceA's centroid
-    d_B_to_A = np.linalg.norm(coords_B_full - centroid_A_rough, axis=1)
-    # Gaussian weight: high near A, low far from A
-    # Use half the A-radius as sigma so that B cells at distance > 1.5 * sigma
-    # (wrong hemisphere / extra organ region) get weight < exp(-1.125) ≈ 0.32.
-    # Apply a floor eps=0.01 so wrong-region cells are 100x less attractive as
-    # targets: the OT plan naturally concentrates on the correct region.
-    sigma_tight = sigma_bias * 0.5   # tighter sigma for stronger contrast
-    w_spatial   = np.maximum(
-        np.exp(-0.5 * (d_B_to_A / sigma_tight) ** 2),
-        0.01                          # floor: never fully exclude (OT stays feasible)
-    ).astype(np.float64)
-    # Apply to b_np for the FILTERED slice (sB_filt may be a subset of sliceB)
-    bc_B_full = np.array(sliceB.obs_names)
-    bc_B_filt = np.array(sB_filt.obs_names)
-    bc_to_w   = {bc: w_spatial[i] for i, bc in enumerate(bc_B_full)}
-    w_filt    = np.array([bc_to_w.get(bc, 0.01) for bc in bc_B_filt], dtype=np.float64)
-    b_weighted = b_np * w_filt
-    b_weighted = np.maximum(b_weighted, 1e-10)   # avoid exact zeros
+    # ── Region-aware spatial prior (generalised, organ-agnostic) ─────────────
+    # WHY THIS REPLACES THE CENTROID-DISTANCE PRIOR:
+    # The old code placed the prior at sliceB's global centroid. For organs
+    # with multiple symmetric regions, that can weight several valid regions
+    # equally and prevent region selection.
+    #
+    # The new code uses the WINNING REGION from BISPA initialisation.
+    # Cells in the winning region: weight = 1.0
+    # Cells at boundary (within one radius): Gaussian decay → ~0.5 at boundary
+    # Cells far outside: floor = 0.01 (keeps OT feasible)
+    #
+    # This works for any organ with repeated regions.
+    # because the winning region is determined by spatial_overlap_score
+    # which tests geometric + biological compatibility jointly.
+    from .region_matcher import compute_region_spatial_prior, rank_region_candidates
+    _community_labels_full = bispa_info.get("labels_B", np.zeros(len(sliceB), dtype=np.int32))
+
+    if bispa_info.get("community_similarity") is not None:
+        S_region = np.asarray(bispa_info["community_similarity"], dtype=np.float64)
+        comms_B = np.asarray(bispa_info.get("community_labels_B", np.unique(_community_labels_full)))
+        region_scores = S_region.max(axis=0)
+        best_ks, ranked_scores, region_weights = rank_region_candidates(
+            region_scores, comms_B, top_k=min(3, len(comms_B)))
+        w_prior_full = compute_region_spatial_prior(
+            sliceA_rough, sliceB,
+            community_labels=_community_labels_full,
+            radius=radius,
+            best_ks=best_ks,
+            region_weights=region_weights,
+        )
+    else:
+        _best_k_label = (int(bispa_info["matched_pairs"][0][1])
+                         if bispa_info.get("matched_pairs") else 0)
+        w_prior_full = compute_region_spatial_prior(
+            sliceA_rough, sliceB,
+            community_labels=_community_labels_full,
+            radius=radius,
+            best_k=_best_k_label,
+        )
+
+    bc_B_full  = np.array(sliceB.obs_names)
+    bc_B_filt  = np.array(sB_filt.obs_names)
+    bc_to_w    = {bc: w_prior_full[i] for i, bc in enumerate(bc_B_full)}
+    w_filt     = np.array([bc_to_w.get(bc, 0.01) for bc in bc_B_filt],
+                          dtype=np.float64)
+    b_weighted  = b_np * w_filt
+    b_weighted  = np.maximum(b_weighted, 1e-10)
     b_weighted /= b_weighted.sum()
-    frac_near = float((d_B_to_A < 1.5 * sigma_bias).mean())
-    print(f"[SEOT] Spatial bias: sigma={sigma_bias:.1f}  "
-          f"{frac_near*100:.1f}% of B cells within 1.5*sigma of A centroid")
-    log.write(f"Spatial bias: sigma={sigma_bias:.1f}  "
-              f"frac_near={frac_near:.3f}\n")
+
+    frac_in_region = float((w_filt > 0.5).mean())
+        print(f"[SEOTv2] Region prior: {frac_in_region*100:.1f}% of B cells "
+            f"in candidate regions (weight=1.0); boundary cells decay over radius={radius:.0f}")
+        log.write(f"Region prior: frac_in_region={frac_in_region:.3f}  radius={radius}\n")
 
     # Adjust R_init and t_init to account for the rough rotation already applied
     # (sliceA_rough has theta_init baked in; R_init from Procrustes is the
@@ -866,8 +827,20 @@ def pairwise_align_seot(
     # Use the BISPA Fourier estimate as the multi-start base.
     # R_init_em = I (0°) was wrong: the BISPA estimate (e.g. 307°) is the
     # best starting point and should always appear in the candidate set.
+    # 4 biologically motivated candidates instead of 8 fixed:
+    # theta      — the Fourier-Mellin estimate (most likely correct)
+    # theta+180° — the bilateral mirror (second most likely for symmetric organs)
+    # theta+90°  — fallback for organs with 4-fold symmetry (heart)
+    # theta+270° — the other 90° fallback
+    # Any additional 45° candidates between these are biologically implausible
+    # and only waste computation on false basins of attraction.
     theta_bispa = bispa_info["theta_init"]
-    candidate_thetas = [theta_bispa + k*45.0 for k in range(8)]
+    candidate_thetas = [
+        theta_bispa,
+        (theta_bispa + 180.0) % 360.0,
+        (theta_bispa + 90.0)  % 360.0,
+        (theta_bispa + 270.0) % 360.0,
+    ]
 
     best_pi = np.outer(a_sub, b_weighted)
     best_R = np.eye(2)

@@ -1,83 +1,4 @@
-"""
-rapa.py — Region-Aware Partial Alignment (RAPA) for INCENT-SE
-=============================================================
-Solves the "where in B does A come from?" problem for spatial transcriptomics
-slices where:
-
-  * sliceA is a spatial sub-region of sliceB  (partial overlap)
-  * sliceB may contain multiple anatomically symmetric or repeated regions
-    (brain hemispheres, heart chambers, kidney lobes, liver lobules …)
-  * The spatial coordinate frames of A and B may differ arbitrarily
-    (cross-timepoint data from different scanners)
-
-Why existing methods fail on this problem
------------------------------------------
-Standard FGW / PASTE / INCENT-ST use balanced optimal transport.
-When sliceA is one hemisphere and sliceB contains two hemispheres,
-balanced OT spreads the transport plan across both hemispheres because
-they are anatomically symmetric (same GW cost on either side).
-
-Two compounding bugs:
-  1. Cross-timepoint pose estimation produces a nonsensical translation
-     (scanner-frame offsets: tx~1.7M, ty~4.8M) that lands sliceA outside
-     sliceB's coordinate range.  The GW term is then effectively disabled.
-  2. The OT plan mass = 1.0 (balanced) forces all of sliceA to distribute
-     across all of sliceB, impossible to concentrate in one hemisphere.
-
-The RAPA solution (four stages)
---------------------------------
-Stage 0 — Rotation-only pose
-    Use the Fourier rotation estimate θ (reliable) but DISCARD the
-    centroid translation (meaningless across scanners).  Instead,
-    centre sliceA on sliceB's centroid as a neutral starting point.
-    The correct fine-grained translation emerges from Stage 2.
-
-Stage 1 — Unsupervised spatial decomposition of target B
-    Build a spatial kNN graph on sliceB's coordinates.
-    Run Leiden community detection to find the K autonomous spatial
-    communities (anatomical regions) in B.
-    K is estimated automatically from the modularity landscape.
-    For mouse brain coronal sections: K=2 (left/right hemisphere).
-    For a 4-chamber heart cross-section: K=4.
-    For a kidney: K=2 (cortex/medulla) or K=3.
-    No prior knowledge of the organ is required.
-
-Stage 2 — Source-to-region matching (find C*)
-    For each community C_k in B, compute a profile:
-        P(C_k) = [cell-type distribution, spatial aspect ratio,
-                  mean gene expression PC1..PC5]
-    Compute profile P(A) for sliceA.
-    Match A to the best region: C* = argmin_k  d(P(A), P(C_k))
-    where d is a composite distance (JSD on cell types + cosine on expression).
-    This breaks bilateral symmetry at the ORGAN REGION level, not cell level.
-
-    After identifying C*: recover the physically meaningful translation
-        t* = centroid(C*) − R(θ) · centroid(A)
-    and re-apply the pose so sliceA is centred on C*.
-
-Stage 3 — Soft-anchored partial FUGW
-    Run unbalanced FUGW (not balanced FGW) with:
-      * Overlap prior  s_prior = n_A / n_{C*}
-      * Anchor cost    M_anchor[i,j] = λ · I[j ∉ C*_soft]
-        (soft: cells near C* boundary get partial penalty, not hard 0/1)
-      * Bilateral contiguity: adds target-side term R_B(π) so the
-        RECEIVING region in B is also spatially compact.
-
-Generalisation
---------------
-The algorithm is completely agnostic to organ identity.
-The spatial community detection finds whatever repeating/symmetric structure
-exists in the data.  The profile matching then selects the best community.
-Works for any number of communities K ≥ 1 (K=1 = the classical full-overlap case,
-which gracefully falls back to standard FUGW).
-
-Public API
-----------
-decompose_target(sliceB, ...)          → community labels (n_B,) int array
-match_source_to_region(sliceA, sliceB, community_labels, ...) → (best_k, scores)
-build_anchor_cost(sliceB, community_labels, best_k, ...) → (n_A, n_B) float32
-pairwise_align_rapa(sliceA, sliceB, ...)  → (pi, matched_region, overlap_fraction)
-"""
+"""Region-aware partial alignment helpers for INCENT-SE."""
 
 import os
 import time
@@ -109,9 +30,10 @@ def apply_rotation_only_pose(
     coordinate origins are completely unrelated.  The centroid-based translation
         t = centroid_B − R(θ) · centroid_A
     maps sliceA's centroid onto sliceB's GLOBAL centroid.  But if sliceB
-    contains two hemispheres, its global centroid is the midline — not
-    the centre of either hemisphere.  This lands sliceA at the midline,
-    which disables the spatial GW term and causes expression-only matching.
+    contains multiple repeated regions, its global centroid may sit between
+    valid targets rather than inside one target region.  This can land sliceA
+    at an ambiguous location, which disables the spatial GW term and causes
+    expression-only matching.
 
     Instead:
       1. Rotate sliceA by θ (correct and reliable).
@@ -175,23 +97,23 @@ def decompose_target(
     2. Run Leiden community detection with **adaptive resolution**:
        - Start at a very low resolution (0.001) and increase until every
          community is smaller than target_min_region_frac of n_B.
-       - This gives the coarsest valid partition — exactly the number of
-         top-level anatomical regions (2 for brain hemispheres, 4 for a
-         4-chamber heart, etc.) without over-segmenting.
+         - This gives the coarsest valid partition — exactly the number of
+         top-level anatomical regions (2 for a paired organ, 4 for a
+         four-compartment organ, etc.) without over-segmenting.
     3. Merge any remaining small communities (< min_community_size_frac)
        into their spatially nearest neighbour.
 
     Why adaptive resolution?
     ------------------------
     A fixed resolution=0.3 produced K=13 tiny communities on a 14k-cell
-    MERFISH brain section — each community was only ~1000 cells, far too
-    small to represent a whole hemisphere (~7000 cells).  The problem is
+    MERFISH section — each community was only ~1000 cells, far too
+    small to represent a whole target region.  The problem is
     that Leiden resolution interacts with graph density in a non-linear way
     that differs across datasets and spatial scales.
 
     The adaptive search finds the largest resolution at which every
     community still covers at least target_min_region_frac of n_B.
-    For brain hemispheres (two ~50% regions): target_min_region_frac=0.20
+    For two ~50% regions: target_min_region_frac=0.20
     gives K=2 because any finer partition creates communities < 20% of n_B.
 
     If resolution is passed explicitly it overrides the adaptive search.
@@ -209,8 +131,8 @@ def decompose_target(
     target_min_region_frac : float, default 0.20
         Adaptive search target: find the coarsest resolution where every
         community covers at least this fraction of n_B.
-        0.20 → finds K=2 for brain (two 50% hemispheres).
-        0.10 → finds K≤4 (useful for heart with four 25% chambers).
+        0.20 → finds K=2 for two repeated regions.
+        0.10 → finds K≤4 for four-way symmetry.
         Lower values allow finer partitions.
     use_gpu    : bool — kept for API consistency (community detection is CPU).
     verbose    : bool.
@@ -267,7 +189,7 @@ def decompose_target(
         # still covers at least target_min_region_frac of n_B.
         #
         # Why this criterion?
-        #   If target_min_region_frac=0.20 and we have K=2 hemispheres,
+        #   If target_min_region_frac=0.20 and we have K=2 repeated regions,
         #   each ~50% of n_B — both pass the 20% threshold.
         #   If resolution is too high and we get K=5 communities of ~20%
         #   each, SOME will be below 20% and the condition fails.
@@ -412,8 +334,8 @@ def _region_profile(adata: AnnData, mask: Optional[np.ndarray] = None) -> dict:
     expression_mean: (p,) float — mean log-normalised gene expression vector.
     spatial_centroid: (2,) float — mean spatial coordinate.
     spatial_aspect : float — bounding-box aspect ratio (width/height).
-        Encodes elongated shapes (one hemisphere is longer than tall;
-        two hemispheres together form a more square shape).
+        Encodes elongated shapes when repeated regions create an asymmetric
+        tissue footprint.
 
     Parameters
     ----------
@@ -471,17 +393,16 @@ def _profile_distance(
     Weights: cell-type JSD dominates (0.6), expression is secondary (0.3),
     shape is a weak tiebreaker (0.1).
 
-    JSD on cell-type distributions is the strongest signal:
-      - One hemisphere of mouse brain has roughly the same cell-type
-        composition regardless of timepoint (neuron subtypes are conserved).
-      - Two hemispheres together look like the same distribution (symmetric)
-        but each individual hemisphere has the same distribution as the source.
-      - This means JSD alone CAN'T distinguish left from right hemisphere!
-        We need the SPATIAL context (which half of B does this community sit in?)
-        rather than the expression-based profile.
+        JSD on cell-type distributions is the strongest signal:
+            - A repeated region can have roughly the same cell-type composition
+                regardless of timepoint.
+            - Multiple regions can look similar in expression space even when they
+                occupy different compartments.
+            - This means JSD alone can't distinguish repeated regions.
+                We need the SPATIAL context rather than the expression-based profile.
 
     So the distance is used to RANK communities by similarity to A, and
-    then spatial context (centroid position relative to sliceB's midline)
+    then spatial context (centroid position relative to the tissue footprint)
     breaks ties for symmetric organs.
 
     Parameters
@@ -538,14 +459,12 @@ def _spatial_side_score(
     Score how well a community's SPATIAL POSITION matches sliceA's position
     relative to sliceB's overall structure.
 
-    For symmetric organs (brain hemispheres), both hemispheres have the same
-    expression profile.  The spatial tiebreaker works as follows:
+    For symmetric organs, multiple regions can have the same expression
+    profile.  The spatial tiebreaker works as follows:
 
     Intuition: after rotation-only pose, sliceA's centroid sits at sliceB's
-    global centroid (midline).  But within sliceA, the cells closer to the
-    left edge are 'left-leaning' and those closer to the right are 'right-leaning'.
-    Similarly, in sliceB, community C_0 may be the left hemisphere and C_1
-    the right hemisphere.
+    global centroid.  But local spatial context can still distinguish which
+    repeated region a cell belongs to.
 
     This score measures: do the cells in community C_k form the half of sliceB
     that is spatially closer to sliceA (as a whole) than the other half?
@@ -585,105 +504,22 @@ def match_source_to_region(
     sliceA: AnnData,
     sliceB: AnnData,
     community_labels: np.ndarray,
+    radius: float,
     verbose: bool = True,
 ) -> Tuple[int, np.ndarray, dict]:
     """
     Find which community in sliceB best matches sliceA.
 
-    Uses a two-level scoring:
-    Level 1: Multi-modal profile similarity (cell-type JSD + expression cosine)
-             → ranks communities by biological similarity to sliceA
-    Level 2: Spatial proximity tiebreaker
-             → for equally-similar communities (symmetric organs), picks
-               the one spatially closest to sliceA's current position
+    Uses Spatial Overlap Score: for each candidate region k, hypothetically
+    place sliceA at region k's centroid and measure what fraction of sliceA
+    cells find a same-cell-type neighbour within ``radius`` in region k.
 
-    After identifying C*, returns the corrected translation to centre
-    sliceA on C* rather than on sliceB's global centroid.
-
-    Parameters
-    ----------
-    sliceA           : AnnData — source slice (after rotation-only pose).
-    sliceB           : AnnData — target slice.
-    community_labels : (n_B,) int — community membership from decompose_target().
-    verbose          : bool.
-
-    Returns
-    -------
-    best_k    : int — index of the best-matching community.
-    scores    : (K,) float array — composite distance to each community.
-    region_info: dict — {centroid, n_cells, spatial_translation, overlap_fraction}
-        spatial_translation: the (tx, ty) to apply to sliceA so its centroid
-                             aligns with C*'s centroid.
-        overlap_fraction: n_A / n_{C*}  (expected partial OT mass).
+    Generalises to any organ with any K regions. No new parameters.
+    ``radius`` is the INCENT neighbourhood radius already required by the user.
     """
-    # Shared cell types
-    ct_A = set(sliceA.obs['cell_type_annot'].astype(str).unique())
-    ct_B = set(sliceB.obs['cell_type_annot'].astype(str).unique())
-    shared_ct = np.array(sorted(ct_A & ct_B))
-
-    # Profile of sliceA
-    pA = _region_profile(sliceA)
-
-    # Profile of each community in sliceB
-    communities = np.unique(community_labels)
-    K = len(communities)
-    scores = np.zeros(K, dtype=np.float64)
-
-    coords_B = sliceB.obsm['spatial'].astype(np.float64)
-    centroid_A = sliceA.obsm['spatial'].astype(np.float64).mean(axis=0)
-
-    if verbose:
-        print(f"[RAPA match] Scoring {K} communities against sliceA …")
-
-    for i, k in enumerate(communities):
-        mask_k   = community_labels == k
-        pC       = _region_profile(sliceB, mask=mask_k)
-        bio_dist = _profile_distance(pA, pC, shared_ct)
-
-        # Spatial tiebreaker: community centroid distance to sliceA centroid
-        c_k      = coords_B[mask_k].mean(axis=0)
-        sp_dist  = _spatial_side_score(c_k, centroid_A, coords_B, community_labels, k)
-
-        # Normalise spatial score to [0,1] range comparable to bio_dist
-        # We use a soft normalisation: sp_dist / max_diameter_of_B
-        max_diam = float(np.linalg.norm(
-            coords_B.max(axis=0) - coords_B.min(axis=0))) + 1e-6
-        sp_score_norm = sp_dist / max_diam
-
-        scores[i] = bio_dist + 0.2 * sp_score_norm
-
-        if verbose:
-            n_k = mask_k.sum()
-            print(f"  C_{k}: n={n_k:5d}  bio_dist={bio_dist:.4f}  "
-                  f"sp_dist={sp_dist:.1f}  total={scores[i]:.4f}")
-
-    best_idx  = int(np.argmin(scores))
-    best_k    = communities[best_idx]
-    mask_best = community_labels == best_k
-    n_best    = mask_best.sum()
-    centroid_best = coords_B[mask_best].mean(axis=0)
-
-    # Spatial translation to re-centre sliceA on C*
-    spatial_translation = centroid_best - centroid_A
-    overlap_fraction    = min(1.0, len(sliceA) / max(n_best, 1))
-
-    region_info = {
-        'best_k'              : best_k,
-        'n_cells'             : n_best,
-        'centroid'            : centroid_best,
-        'spatial_translation' : spatial_translation,
-        'overlap_fraction'    : overlap_fraction,
-        'all_scores'          : scores,
-        'communities'         : communities,
-    }
-
-    if verbose:
-        print(f"[RAPA match] Best community: C_{best_k}  "
-              f"(n={n_best}, s≈{overlap_fraction:.3f})")
-        print(f"[RAPA match] Translation to C*: "
-              f"Δx={spatial_translation[0]:.1f}  Δy={spatial_translation[1]:.1f}")
-
-    return best_k, scores, region_info
+    from .region_matcher import spatial_overlap_score
+    return spatial_overlap_score(
+        sliceA, sliceB, community_labels, radius, verbose=verbose)
 
 
 def apply_region_translation(
@@ -967,7 +803,7 @@ def pairwise_align_rapa(
 
     leiden_resolution : float, default 0.3
         Controls the granularity of community detection.
-        0.1–0.3: coarse (hemispheres, major lobes).
+        0.1–0.3: coarse (paired regions, major lobes).
         0.5–1.0: fine (cortical layers, lobules).
     min_community_size_frac : float, default 0.05
         Merge communities smaller than this fraction of n_B.
@@ -1067,8 +903,9 @@ def pairwise_align_rapa(
     # ═══════════════════════════════════════════════════════════════════════
     print("[RAPA] Stage 2: Matching source to best target region …")
     best_k, region_scores, region_info = match_source_to_region(
-        sliceA_aligned, sliceB, community_labels, verbose=gpu_verbose)
-
+        sliceA_aligned, sliceB, community_labels,
+        radius=radius,
+        verbose=gpu_verbose)
     # Apply the fine translation to centre sliceA on C*
     sliceA_aligned = apply_region_translation(sliceA_aligned, region_info)
     overlap_prior  = region_info['overlap_fraction']

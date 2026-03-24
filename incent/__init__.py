@@ -5,7 +5,8 @@ INCENT-SE extends the original INCENT with:
 
   Same-timepoint alignment (pairwise_align_se):
     - Fourier-Mellin SE(2) pose estimation
-    - Topological fingerprint cost for bilateral symmetry disambiguation
+        - Topological fingerprint cost for symmetry disambiguation across
+            repeating anatomical regions
     - Spatial contiguity regularisation for realistic partial overlap
 
   Cross-timepoint alignment (pairwise_align_spatiotemporal):
@@ -126,7 +127,6 @@ from .lddmm import (
     estimate_growth_vector,
 )
 
-# ── GPU utilities (for user convenience) ─────────────────────────────────────
 from ._gpu import resolve_device
 
 __all__ = [

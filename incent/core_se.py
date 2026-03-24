@@ -1,27 +1,4 @@
-"""
-core_se.py — INCENT-SE Public Alignment Functions
-==================================================
-This module adds two new public functions that extend the original INCENT:
-
-  pairwise_align_se()
-      Same-timepoint alignment with:
-        1. Fourier-Mellin SE(2) pose estimation (rotation + translation)
-        2. Topological fingerprint cost for bilateral symmetry disambiguation
-        3. Spatial contiguity regularisation for realistic partial overlap
-
-  pairwise_align_spatiotemporal()
-      Cross-timepoint alignment with:
-        1. Everything in pairwise_align_se
-        2. Conditional VAE latent cost (expression-drift-corrected)
-        3. LDDMM diffeomorphic spatial deformation (BCD joint optimisation)
-
-Both functions call the existing _preprocess() and
-fused_gromov_wasserstein_incent() from the original INCENT codebase,
-so the entire solver infrastructure is reused.
-
-Design principle: read this file top-to-bottom and you will understand
-the full algorithm.  Every non-trivial step is explained in comments.
-"""
+"""Public INCENT-SE alignment entrypoints."""
 
 import os
 import time
@@ -97,13 +74,13 @@ def pairwise_align_se(
         Uses the Fourier-Mellin Transform on cell-type density images to
         estimate rotation angle θ and translation (tx, ty).  Rotates sliceA
         into sliceB's coordinate frame BEFORE computing distances.
-        This eliminates the bilateral symmetry degeneracy for most cases.
+        This eliminates the symmetry degeneracy for most cases.
 
     Step 2 — Topological fingerprint cost M_topo
         Computes a per-cell persistent-homology fingerprint and adds the
         pairwise fingerprint distance (weighted by η) to the FGW linear cost.
         M_total = M1 + γ·M2 + η·M_topo
-        M_topo distinguishes left-vs-right hemisphere regions even when
+        M_topo distinguishes repeated regions even when
         M1 (expression) and M2 (neighbourhood JSD) are symmetric.
 
     Step 3 — Spatial contiguity regularisation
@@ -446,11 +423,11 @@ def pairwise_align_spatiotemporal(
     """
     Joint cross-timepoint alignment: OT correspondence + LDDMM deformation.
 
-    For partial-overlap cross-timepoint data (e.g. one hemisphere vs two
-    hemispheres, different timepoints), set ``use_rapa=True`` (default).
+    For partial-overlap cross-timepoint data with repeated regions or
+    multiple anatomical compartments, set ``use_rapa=True`` (default).
     This enables the Region-Aware Partial Alignment pipeline (RAPA) which:
       1. Uses rotation-only pose (discards scanner-frame translation)
-      2. Decomposes sliceB into spatial communities (hemispheres, chambers…)
+    2. Decomposes sliceB into spatial communities (regions, chambers…)
       3. Matches sliceA to the correct community and recovers fine translation
       4. Runs unbalanced FUGW anchored to the matched community
 
@@ -560,7 +537,7 @@ def pairwise_align_spatiotemporal(
         # Jointly recovers rotation/translation AND cell correspondences.
         # BISPA + expression-guided spectral provides symmetry-breaking init.
         # Six improvements active: coordinate normalisation, multi-start EM,
-        # size-ratio rho, hemisphere-biased marginal, alpha warmup.
+        # size-ratio rho, region-biased marginal, alpha warmup.
         from .seot import pairwise_align_seot
         result = pairwise_align_seot(
             sliceA=sliceA, sliceB=sliceB,

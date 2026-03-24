@@ -1,16 +1,4 @@
-"""
-cast.py  CAST: Coarse-to-fine Anatomical Spatial Transcriptomics alignment
-
-The generalised solution for partial-overlap, bilateral-symmetry,
-arbitrary SE(2) alignment of spatial transcriptomics slices.
-
-Three-stage pipeline:
-  Stage 1: Multi-scale cell-type descriptors (SE(2)-invariant)
-  Stage 2: Candidate pair matching (cosine similarity)
-  Stage 3: RANSAC SE(2) -- breaks bilateral symmetry via spatial consistency
-  Stage 4: SEOT EM -- joint optimisation of (R,t) and cell correspondences
-  Stage 5: LDDMM BCD -- cross-timepoint spatial deformation (optional)
-"""
+"""CAST alignment pipeline for partial-overlap spatial transcriptomics."""
 
 import os, time, datetime, warnings
 import numpy as np
@@ -46,8 +34,8 @@ def compute_multiscale_descriptors(
     SE(2)-invariant:    built from pairwise distances, unchanged by rotation/translation.
     Cross-tp stable:    uses CELL TYPE labels, not raw gene expression.
     Locally distinctive: different tissue locations have different cell-type
-                         neighbourhood patterns even in bilaterally symmetric organs.
-                         The left hemisphere patterns mirror the right, but the
+                         neighbourhood patterns even in symmetric organs.
+                         Repeated regions can mirror one another, but the
                          relative arrangement of cell types is subtly different
                          (different numbers of specific interneurons, different
                          layer thickness, corpus callosum asymmetry).
@@ -238,9 +226,9 @@ def ransac_se2(
 
     Key property: the CORRECT transformation (A->correct region of B) maps
     ALL A cells near their true B counterparts. Wrong transformations
-    (A->wrong hemisphere) have near-zero spatial consistency.
+    (A->wrong repeated region) have near-zero spatial consistency.
 
-    This is the mechanism that breaks bilateral symmetry without any
+    This is the mechanism that breaks repeated-region ambiguity without any
     assumption about the number of regions, organ type, or overlap fraction.
 
     Algorithm
@@ -417,24 +405,24 @@ def pairwise_align_cast(
              translation fails for partial/asymmetric overlap.
 
     BISPA:   community-level matching -- global cell-type distributions are
-             IDENTICAL between bilateral hemispheres by definition. Cannot
+             IDENTICAL between repeated regions by definition. Cannot
              distinguish left from right at the global level.
 
     SEOT:    correct objective (explicit R,t) but relies on BISPA for initialisation
-             which fails due to bilateral symmetry. Multi-start covers 8 rotations
+             which fails due to symmetry. Multi-start covers 8 rotations
              but without a strong spatial-consistency discriminator.
 
     CAST solves it by using SPATIAL CONSISTENCY as the discriminator
     ---------------------------------------------------------------
     The correct SE(2) transformation maps A cells near their true B counterparts.
-    A wrong transformation (e.g. pointing to mirror hemisphere) maps A cells
+    A wrong transformation (e.g. pointing to a different symmetric region) maps A cells
     to locations where B's spatial cell-type pattern is DIFFERENT -- even though
     the global histograms are symmetric, the local patterns are not.
 
     A cell in the left motor cortex has its unique neighbourhood (certain
     proportions of layer 2/3 neurons, inhibitory interneurons, etc. at radii
     100/200/400 um).  The best matching cell in B is its true counterpart --
-    not its mirror-image counterpart in the right hemisphere, because the mirror
+    not its repeated-region counterpart, because the mirrored
     has a subtly different pattern (different interneuron density, different
     layer thickness, different proximity to corpus callosum).
 
@@ -454,7 +442,7 @@ def pairwise_align_cast(
     Stage 3: RANSAC SE(2) (spatial consistency filtering)
              Sample 2 pairs -> SE(2) hypothesis -> count spatial inliers.
              Select hypothesis with most inliers. Refine with Procrustes.
-             THIS BREAKS BILATERAL SYMMETRY.
+             THIS BREAKS SYMMETRY.
 
     Stage 4: SEOT EM (joint optimisation of R,t and cell correspondences)
              Polish the RANSAC result with partial unbalanced OT.
@@ -466,8 +454,7 @@ def pairwise_align_cast(
 
     Generalisation
     --------------
-    Works for brain (K=2 hemispheres), heart (K=4 chambers), kidney, liver,
-    any organ, any number of symmetric regions -- no organ-specific code.
+    Works for any organ, any number of symmetric regions -- no organ-specific code.
     Works whether A or B is larger (symmetric treatment).
     Works for 30% to 95% overlap.
     Works for same-timepoint and cross-timepoint.

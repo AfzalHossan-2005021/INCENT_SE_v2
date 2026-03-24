@@ -1,9 +1,4 @@
-"""
-bispa.py -- Bidirectional Symmetric Partial Alignment (BISPA) for INCENT-SE
-
-BISPA supersedes RAPA by treating both slices symmetrically.
-See docstrings on individual functions for details.
-"""
+"""Bidirectional symmetric partial alignment helpers for INCENT-SE."""
 
 import os
 import time
@@ -35,9 +30,9 @@ def decompose_slice(
 
     The adaptive Leiden binary search finds the largest resolution where
     every community covers >= target_min_region_frac of n_cells:
-      brain (2 hemispheres)  -> target_min_region_frac=0.20 -> K=2
-      heart (4 chambers)     -> target_min_region_frac=0.10 -> K<=4
-      liver (5 lobes)        -> target_min_region_frac=0.08 -> K<=5
+    paired regions          -> target_min_region_frac=0.20 -> K=2
+    four-way symmetry       -> target_min_region_frac=0.10 -> K<=4
+    multi-lobed organ       -> target_min_region_frac=0.08 -> K<=5
       single region (K=1)    -> any target works
 
     Parameters
@@ -136,15 +131,15 @@ def decompose_slice(
 
     # ── K=1 fallback: expression-guided spectral clustering ──────────────────
     # When Leiden finds K=1 (the spatial kNN graph is too well-connected to
-    # split, e.g. brain hemispheres joined through corpus callosum), fall back
-    # to spectral clustering on a COMBINED spatial+expression affinity.
+    # split), fall back to spectral clustering on a COMBINED spatial+
+    # expression affinity.
     #
     # Why combined affinity works when pure-spatial Leiden fails:
-    #   - The corpus callosum has a distinct cell-type composition (oligodendrocytes)
-    #   - Cells in the left hemisphere are more similar to other left cells
-    #     than to right cells in expression space
-    #   - The combined affinity has a lower similarity across the midline,
-    #     so spectral clustering correctly separates the two halves
+    #   - Bridging tissue often has distinct cell-type composition
+    #   - Cells in one region are more similar to other cells in the same
+    #     region than to cells in a different repeated region
+    #   - The combined affinity has a lower similarity across the bridge,
+    #     so spectral clustering can separate repeated regions
     if len(np.unique(labels)) == 1:
         if verbose:
             print(f"[BISPA decompose:{slice_label}] K=1 from Leiden; "
@@ -171,20 +166,20 @@ def _expression_guided_spectral(adata, n_clusters=2, n_neighbors=15,
                                 verbose=True):
     """
     Expression-guided spectral clustering for organs with spatially adjacent
-    symmetric regions (e.g. brain hemispheres connected through corpus callosum).
+    symmetric regions.
 
-    Pure spatial clustering fails because the corpus callosum spatially bridges
-    both hemispheres.  This function builds a combined affinity matrix:
+    Pure spatial clustering can fail when bridging tissue connects repeated
+    regions.  This function builds a combined affinity matrix:
       W[i,j] = spatial_affinity[i,j] * expression_affinity[i,j]
 
-    Cells in the same hemisphere have high spatial AND expression similarity.
-    Cells across the midline have lower expression similarity (different cell
+    Cells in the same region have high spatial AND expression similarity.
+    Cells across the bridge have lower expression similarity (different cell
     type compositions) even when spatially adjacent.
 
     Parameters
     ----------
     adata      : AnnData with .obsm['spatial'] and .obs['cell_type_annot'].
-    n_clusters : int -- number of clusters (2 for brain hemispheres).
+    n_clusters : int -- number of clusters (2 for repeated regions).
     n_neighbors: int -- for kNN affinity construction.
     verbose    : bool.
 
@@ -443,7 +438,7 @@ def recover_pose_matched(sliceA, labels_A, sliceB, labels_B,
     Estimate SE(2) pose using ONLY matched community cells.
 
     Running Fourier pose on full slices is confusing when one slice has
-    extra unmatched communities (e.g. extra hemisphere).  By restricting
+    extra unmatched communities (e.g. extra repeated region).  By restricting
     to matched cells, both density fields represent the same anatomy.
 
     Algorithm:
@@ -693,12 +688,7 @@ def pairwise_align_bispa(
     """
     Bidirectional Symmetric Partial Alignment.
 
-    This is the correct generalisation that handles ALL configurations:
-    - Either slice may be the larger one with multiple regions
-    - Both may be partial (mutual partial overlap)
-    - Either may have symmetric sub-regions
-    - Source/target assignment is arbitrary
-    - Generalises to any organ without organ-specific parameters
+    Generalised to arbitrary repeated-region configurations.
 
     Parameters
     ----------
@@ -711,8 +701,8 @@ def pairwise_align_bispa(
 
     target_min_region_frac_A : float, default 0.20
         Adaptive Leiden target for sliceA: each community >= this fraction.
-        0.20 -> K=2 for brain (two ~50% hemispheres).
-        0.10 -> K<=4 for heart (four ~25% chambers).
+        0.20 -> K=2 for two repeated regions.
+        0.10 -> K<=4 for four-way symmetry.
     target_min_region_frac_B : float, default 0.20
         Same for sliceB. Can differ if slices come from different organs.
     leiden_resolution_A / leiden_resolution_B : float or None
@@ -822,12 +812,20 @@ def pairwise_align_bispa(
     # STAGE 2: Bipartite community matching
     # ------------------------------------------------------------------
     print("[BISPA] Stage 2: Community similarity + Hungarian matching ...")
-    S, comms_A, comms_B = build_community_similarity(
+    # Use spatial overlap scores for community matching.
+    # The old build_community_similarity used global JSD which is identical
+    # for many symmetric regions.
+    # Spatial overlap score tests geometric + biological compatibility jointly.
+    from .region_matcher import _build_community_overlap_matrix
+    S_overlap, comms_A, comms_B = _build_community_overlap_matrix(
         sliceA_rough, labels_A, sliceB, labels_B,
-        cross_timepoint=cross_timepoint, verbose=gpu_verbose)
+        radius=radius, verbose=gpu_verbose)
 
+    # Convert similarity to distance for Hungarian (lower = better match)
     matched_pairs, unmatched_A, unmatched_B = hungarian_matching(
-        S, comms_A, comms_B, threshold=matching_threshold, verbose=gpu_verbose)
+        1.0 - S_overlap, comms_A, comms_B,
+        threshold=1.0 - 0.10,   # pairs with overlap_score < 0.10 are unmatched
+        verbose=gpu_verbose)
 
     if not matched_pairs:
         print("[BISPA] WARNING: No matched pairs found. Treating as full overlap.")
@@ -1025,7 +1023,7 @@ def pairwise_align_bispa(
             "tx":                   tx,
             "ty":                   ty,
             "sliceA_aligned":       sliceA_aligned,
-            "community_similarity": S,
+            "community_similarity": S_overlap,
             "pi_mass":              pi_mass,
         }
     return pi
