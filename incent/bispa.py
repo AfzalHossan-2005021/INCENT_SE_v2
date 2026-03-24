@@ -665,9 +665,9 @@ def pairwise_align_bispa(
     contiguity_sigma=None,
     # FUGW
     base_reg_marginals=1.0,
-    epsilon=0.0,
+    epsilon=1e-2,
     divergence="kl",
-    unbalanced_solver="mm",
+    unbalanced_solver="sinkhorn",
     max_iter_fugw=100,
     # Pose
     rough_grid_size=256,
@@ -969,7 +969,7 @@ def pairwise_align_bispa(
         wx=a_np,
         wy=b_np,
         reg_marginals=(rho_A, rho_B),   # per-side relaxation
-        epsilon=epsilon,
+        epsilon=max(float(epsilon), 1e-2),
         divergence=divergence,
         unbalanced_solver=unbalanced_solver,
         alpha=alpha_fugw,

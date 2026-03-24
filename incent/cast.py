@@ -777,8 +777,8 @@ def pairwise_align_cast(
                 Cx=D_A_np, Cy=D_B_current,
                 wx=a_np_bcd, wy=b_np_bcd,
                 reg_marginals=(rho_A_use, rho_B_use),
-                epsilon=0.0, divergence="kl",
-                unbalanced_solver="mm",
+                epsilon=reg_sinkhorn, divergence="kl",
+                unbalanced_solver="sinkhorn",
                 alpha=alpha_fugw, M=M_bio.astype(np.float64),
                 max_iter=50, tol=1e-6, max_iter_ot=500, tol_ot=1e-6,
                 log=False, verbose=False)
