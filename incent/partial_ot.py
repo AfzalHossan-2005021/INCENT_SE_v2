@@ -380,7 +380,7 @@ def iterative_overlap_fugw(
                 reg_marginals=scalar_rho,
                 epsilon=epsilon,
                 divergence=divergence,
-                unbalanced_solver="mm",
+                unbalanced_solver="sinkhorn",
                 alpha=alpha_fugw,
                 M=M_bio,
                 init_pi=pi if outer_it > 0 else None,
