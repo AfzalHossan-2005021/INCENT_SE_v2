@@ -62,8 +62,10 @@ def run_incent(
         use_magsac=True,
         do_lo_ransac=True,
         use_adaptive_ot=True,
+        use_hierarchical_ot=True,    # <--- ENABLED BIOLOGICAL MULTI-SCALE
         cross_timepoint=True,
         use_lddmm=True,
+        lambda_div=0.05,             # <--- ENABLED VISCOELASTIC BIOLOGICAL CONSTRAINT
         sliceA_name=data1,
         sliceB_name=data2,
         use_gpu=use_gpu,

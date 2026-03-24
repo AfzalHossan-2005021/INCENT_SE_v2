@@ -801,3 +801,122 @@ def pairwise_align_spatiotemporal(
     if return_obj:
         return pi_final, phi, xi, cost_history
     return pi_final
+
+
+def pairwise_align_partial_slices(
+    sliceA:    AnnData,
+    sliceB:    AnnData,
+    alpha:     float,
+    beta:      float,
+    gamma:     float,
+    radius:    float,
+    filePath:  str,
+    cross_timepoint: bool = False,
+    estimate_rotation: bool = True,
+    use_seot: bool = True,
+    use_lddmm: bool = False,
+    cvae_model=None,
+    cvae_path: Optional[str] = None,
+    cvae_epochs: int = 80,
+    cvae_latent_dim: int = 32,
+    # Shared options for both methods
+    eta: float = 0.3,
+    lambda_spatial: float = 0.1,
+    neighborhood_dissimilarity: str = 'jsd',
+    return_obj: bool = False,
+    verbose: bool = True,
+    gpu_verbose: bool = True,
+    use_gpu: bool = False,
+    sliceA_name: Optional[str] = None,
+    sliceB_name: Optional[str] = None,
+    overwrite: bool = False,
+    **kwargs,
+) -> Union[NDArray, Tuple]:
+    """
+    Generalised partial slice alignment for symmetric organs.
+
+    Supports source/target patch matching at arbitrary translations and
+    rotations, with optional cross-timepoint gene drift handling.
+
+    For same-timepoint data, this calls ``pairwise_align_se`` (fast
+    Fourier-init + topology + contiguity).  For cross-timepoint data,
+    it uses ``pairwise_align_spatiotemporal`` (RAPA/SEOT + cVAE).  This
+    encapsulates the robust pipeline steps described in the paper-style plan.
+
+    Returns
+    -------
+    If return_obj=False:
+        pi : ndarray (n_A, n_B) transport plan.
+    If return_obj=True:
+        For same-timepoint:
+            (pi, pose_theta, pose_tx, pose_ty, pose_score)
+        For cross-timepoint:
+            (pi, sliceA_aligned, diag, residual_history)
+    """
+    if cross_timepoint:
+        result = pairwise_align_spatiotemporal(
+            sliceA=sliceA,
+            sliceB=sliceB,
+            alpha=alpha,
+            beta=beta,
+            gamma=gamma,
+            radius=radius,
+            filePath=filePath,
+            use_rapa=True,
+            cross_timepoint=True,
+            use_lddmm=use_lddmm,
+            max_em_iter=kwargs.get('max_em_iter', 50),
+            reg_sinkhorn=kwargs.get('reg_sinkhorn', 0.01),
+            cvae_model=cvae_model,
+            cvae_path=cvae_path,
+            cvae_epochs=cvae_epochs,
+            cvae_latent_dim=cvae_latent_dim,
+            eta=eta,
+            lambda_spatial=lambda_spatial,
+            use_rep=kwargs.get('use_rep', None),
+            numItermax=kwargs.get('numItermax', 2000),
+            use_gpu=use_gpu,
+            gpu_verbose=gpu_verbose,
+            verbose=verbose,
+            sliceA_name=sliceA_name,
+            sliceB_name=sliceB_name,
+            overwrite=overwrite,
+            neighborhood_dissimilarity=neighborhood_dissimilarity,
+            return_obj=return_obj,
+        )
+        # pass result transparently
+        return result
+    # same-timepoint pipeline
+    result = pairwise_align_se(
+        sliceA=sliceA,
+        sliceB=sliceB,
+        alpha=alpha,
+        beta=beta,
+        gamma=gamma,
+        radius=radius,
+        filePath=filePath,
+        estimate_rotation=estimate_rotation,
+        pose_grid_size=kwargs.get('pose_grid_size', 256),
+        pose_sigma_px=kwargs.get('pose_sigma_px', 2.5),
+        eta=eta,
+        topo_n_bins=kwargs.get('topo_n_bins', 16),
+        topo_metric=kwargs.get('topo_metric', 'cosine'),
+        lambda_spatial=lambda_spatial,
+        contiguity_sigma=kwargs.get('contiguity_sigma', None),
+        contiguity_k_nn=kwargs.get('contiguity_k_nn', 20),
+        use_rep=kwargs.get('use_rep', None),
+        G_init=kwargs.get('G_init', None),
+        a_distribution=kwargs.get('a_distribution', None),
+        b_distribution=kwargs.get('b_distribution', None),
+        numItermax=kwargs.get('numItermax', 6000),
+        backend=kwargs.get('backend', None),
+        use_gpu=use_gpu,
+        return_obj=return_obj,
+        verbose=verbose,
+        gpu_verbose=gpu_verbose,
+        sliceA_name=sliceA_name,
+        sliceB_name=sliceB_name,
+        overwrite=overwrite,
+        neighborhood_dissimilarity=neighborhood_dissimilarity,
+    )
+    return result

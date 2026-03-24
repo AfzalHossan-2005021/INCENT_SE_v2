@@ -214,6 +214,7 @@ def _transport_loss(
     pi,          # torch tensor (n_A, n_B) on phi.device
     coords_A,    # torch tensor (n_A, 2)  on phi.device
     coords_B,    # torch tensor (n_B, 2)  on phi.device
+    lambda_div:  float = 0.05, # Biological Viscoelastic Constraint (Volume penalty)
 ) -> Tuple:
     """
     Compute E_transport = Σ_{i,j} π_{ij} ||φ(y_j) - x_i||² and ∂E/∂α.
@@ -236,12 +237,17 @@ def _transport_loss(
 
     Gradient ∂E/∂α = 2 · K(y^φ, c)^T · residuals   (m, 2)
 
+    Biological Viscoelastic Prior:
+    Adds an expansion/compression limit restricting the divergence of the underlying 
+    momentum fields map, ensuring the math does not tear or fold the tissue graph.
+
     Parameters  (all torch tensors on phi.device)
     ----------
-    phi      : LDDMMDeformation.
-    pi       : (n_A, n_B) float64.
-    coords_A : (n_A, 2)   float64.
-    coords_B : (n_B, 2)   float64 — original (pre-deformation) sliceB coords.
+    phi        : LDDMMDeformation.
+    pi         : (n_A, n_B) float64.
+    coords_A   : (n_A, 2)   float64.
+    coords_B   : (n_B, 2)   float64 — original (pre-deformation) sliceB coords.
+    lambda_div : float — Regularisation strength for volumetric compressibility.
 
     Returns
     -------
@@ -268,7 +274,30 @@ def _transport_loss(
     K_yB_c    = _gaussian_kernel(y_phi, phi._ctrl, phi.sigma_v)  # (n_B, m)
     grad_alpha = 2.0 * K_yB_c.T @ residuals                      # (m, 2)
 
-    return float(loss.item()), grad_alpha
+    # Apply viscoelastic divergence penalty
+    if lambda_div > 0 and hasattr(phi, '_alpha') and phi._alpha is not None:
+        # Divergence penalty penalises impossible volume expansions/compressions.
+        # Div(v) ≈ sum_i (-1/sigma^2 * (y_phi - c_i) * alpha_i) K(y_phi, c_i)
+        # We penalise the L2 norm of the divergence field structurally matching biological stress-strain limits.
+        alpha_t = to_torch(phi._alpha, phi.device)
+        y_diff = y_phi.unsqueeze(1) - phi._ctrl.unsqueeze(0) # (n_B, m, 2)
+        dot_product = (y_diff * alpha_t.unsqueeze(0)).sum(dim=2) # (n_B, m)
+        div_v = - (1.0 / (phi.sigma_v ** 2)) * torch.sum(dot_product * K_yB_c, dim=1) # (n_B,)
+        
+        # Penalise squared divergence
+        div_loss = torch.sum(div_v ** 2)
+        loss = loss + lambda_div * div_loss
+        
+        # Divergence gradient wrt alpha
+        # d(div^2)/d_alpha_j = 2 * div_v * d(div)/d_alpha_j
+        # d(div)/d_alpha_j = -1/sigma^2 * (y_phi - c_j) * K(y_phi, c_j)
+        div_grad = - (1.0 / (phi.sigma_v ** 2)) * K_yB_c.unsqueeze(2) * y_diff # (n_B, m, 2)
+        # Weighted by 2 * div_v and summed over all source points j
+        div_grad_alpha = 2.0 * torch.sum(div_v.unsqueeze(1).unsqueeze(2) * div_grad, dim=0) # (m, 2)
+        
+        grad_alpha = grad_alpha + lambda_div * div_grad_alpha
+
+    return float(loss), grad_alpha
 
 
 def _transport_loss_numpy(
@@ -276,6 +305,7 @@ def _transport_loss_numpy(
     pi: np.ndarray,
     coords_A: np.ndarray,
     coords_B: np.ndarray,
+    lambda_div: float = 0.05,
 ) -> Tuple[float, np.ndarray]:
     """CPU (numpy) fallback for _transport_loss."""
     y_phi = phi.apply(coords_B)                    # (n_B, 2) numpy
@@ -294,6 +324,20 @@ def _transport_loss_numpy(
     K_yB_c    = _gaussian_kernel(y_phi, to_numpy(phi._ctrl), phi.sigma_v)
     grad_alpha = 2.0 * K_yB_c.T @ residuals              # (m, 2)
 
+    if lambda_div > 0 and hasattr(phi, '_alpha') and phi._alpha is not None:
+        alpha_np = to_numpy(phi._alpha)
+        ctrl_np = to_numpy(phi._ctrl)
+        y_diff = y_phi[:, None, :] - ctrl_np[None, :, :]
+        dot_product = (y_diff * alpha_np[None, :, :]).sum(axis=2)
+        div_v = - (1.0 / (phi.sigma_v ** 2)) * np.sum(dot_product * K_yB_c, axis=1)
+        
+        div_loss = np.sum(div_v ** 2)
+        loss += lambda_div * div_loss
+        
+        div_grad = - (1.0 / (phi.sigma_v ** 2)) * K_yB_c[:, :, None] * y_diff
+        div_grad_alpha = 2.0 * np.sum(div_v[:, None, None] * div_grad, axis=0)
+        grad_alpha += lambda_div * div_grad_alpha
+
     return float(loss), grad_alpha
 
 
@@ -307,6 +351,7 @@ def estimate_deformation(
     coords_B: np.ndarray,
     sigma_v: float,
     lambda_v: float = 1.0,
+    lambda_div: float = 0.05,
     n_steps: int = 5,
     lr: float = 0.01,
     n_iter: int = 100,
@@ -378,9 +423,9 @@ def estimate_deformation(
 
     for it in range(n_iter):
         if use_torch:
-            E_t,  grad_t = _transport_loss(phi, pi_d, cA_d, cB_d)
+            E_t,  grad_t = _transport_loss(phi, pi_d, cA_d, cB_d, lambda_div=lambda_div)
         else:
-            E_t,  grad_t = _transport_loss_numpy(phi, pi_d, cA_d, cB_d)
+            E_t,  grad_t = _transport_loss_numpy(phi, pi_d, cA_d, cB_d, lambda_div=lambda_div)
 
         E_v    = phi.rkhs_norm_squared()
         grad_v = phi.rkhs_norm_gradient()

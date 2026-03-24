@@ -43,6 +43,7 @@ from .utils import (
 from .core_se import (
     pairwise_align_se,
     pairwise_align_spatiotemporal,
+    pairwise_align_partial_slices,
 )
 
 from .run_incent import run_incent
@@ -137,7 +138,7 @@ __all__ = [
     'pairwise_msd', 'to_dense_array', 'extract_data_matrix',
     '_preprocess', '_to_np',
     # INCENT-SE alignment
-    'pairwise_align_se', 'pairwise_align_spatiotemporal',
+    'pairwise_align_se', 'pairwise_align_spatiotemporal', 'pairwise_align_partial_slices',
     'run_incent',
     # Pose
     'estimate_pose', 'apply_pose',

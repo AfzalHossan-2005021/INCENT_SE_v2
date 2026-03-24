@@ -321,6 +321,8 @@ def pairwise_align_cast_v2(
     use_adaptive_ot: bool = True,
     n_adapt_iters: int = 3,
     smoothing_sigma_frac: float = 0.05,
+    # NEW: hierarchical multi-scale OT matching
+    use_hierarchical_ot: bool = False,
     # Cross-timepoint
     cvae_model=None,
     cvae_path: Optional[str] = None,
@@ -331,6 +333,7 @@ def pairwise_align_cast_v2(
     use_lddmm: bool = False,
     sigma_v: float = 300.0,
     lambda_v: float = 1.0,
+    lambda_div: float = 0.05,
     lddmm_lr: float = 0.01,
     lddmm_n_iter: int = 50,
     n_bcd_rounds: int = 3,
@@ -647,19 +650,48 @@ def pairwise_align_cast_v2(
             coords_B_filt.max(axis=0) - coords_B_filt.min(axis=0))) + 1e-6
         sm_sigma  = smoothing_sigma_frac * diam_B_f
 
-        from .partial_ot import iterative_overlap_fugw
-        pi, f_A, f_B = iterative_overlap_fugw(
-            D_A_np, D_B_np,
-            M_bio.astype(np.float64),
-            a_np, b_np,
-            alpha_fugw=alpha_fugw,
-            base_rho=max(rho_A_use, rho_B_use),
-            n_outer_iters=n_adapt_iters,
-            smoothing_sigma=sm_sigma,
-            coords_A=coords_A_filt,
-            coords_B=coords_B_filt,
-            verbose=verbose,
-        )
+        if use_hierarchical_ot:
+            from .hierarchical_ot import hierarchical_fgw
+            print("[CASTv2]    Using biological hierarchical multi-scale OT matching...")
+            expr_A_np = _to_np(sA_filt.X) if sA_filt.X is not None else M_bio.mean(axis=1)[:, None]
+            expr_B_np = _to_np(sB_filt.X) if sB_filt.X is not None else M_bio.mean(axis=0)[:, None]
+            
+            # Using our biological zone clustering algorithm
+            pi_h = hierarchical_fgw(
+                D_A_np, D_B_np, 
+                expr_A_np, expr_B_np, 
+                coords_A_filt, coords_B_filt, 
+                n_clusters=min(50, len(coords_A_filt)//10), 
+                alpha=alpha_fugw
+            )
+            # Incorporate the mask into the iterative FUGW as a powerful prior
+            from .partial_ot import iterative_overlap_fugw
+            pi, f_A, f_B = iterative_overlap_fugw(
+                D_A_np, D_B_np,
+                (M_bio.astype(np.float64) * (1.0 - pi_h * 100)), # Downweigh costs where hierarchical mask matches
+                a_np, b_np,
+                alpha_fugw=alpha_fugw,
+                base_rho=max(rho_A_use, rho_B_use),
+                n_outer_iters=n_adapt_iters,
+                smoothing_sigma=sm_sigma,
+                coords_A=coords_A_filt,
+                coords_B=coords_B_filt,
+                verbose=verbose,
+            )
+        else:
+            from .partial_ot import iterative_overlap_fugw
+            pi, f_A, f_B = iterative_overlap_fugw(
+                D_A_np, D_B_np,
+                M_bio.astype(np.float64),
+                a_np, b_np,
+                alpha_fugw=alpha_fugw,
+                base_rho=max(rho_A_use, rho_B_use),
+                n_outer_iters=n_adapt_iters,
+                smoothing_sigma=sm_sigma,
+                coords_A=coords_A_filt,
+                coords_B=coords_B_filt,
+                verbose=verbose,
+            )
         log.write(f"Adaptive OT: f_A_mean={f_A.mean():.3f}  f_B_mean={f_B.mean():.3f}\n")
 
     # ==================================================================
@@ -674,7 +706,7 @@ def pairwise_align_cast_v2(
             from .lddmm import estimate_deformation, deformed_distances
             phi = estimate_deformation(
                 pi, coords_A_filt, coords_B_filt,
-                sigma_v=sigma_v, lambda_v=lambda_v,
+                sigma_v=sigma_v, lambda_v=lambda_v, lambda_div=lambda_div,
                 lr=lddmm_lr, n_iter=lddmm_n_iter,
                 use_gpu=use_gpu, verbose=False)
             D_B_np_cur = deformed_distances(

@@ -261,6 +261,16 @@ class INCENT_cVAE:
         class _cVAE(nn.Module):
             def __init__(self):
                 super().__init__()
+                # Biological Grounding: Gene-level Feature Attention
+                # Instead of treating all genes equally, learn an unsupervised 
+                # structural attention mask to separate "lineage/identity" genes 
+                # from transient "state/metabolic" genes. This prevents 
+                # temporal gene shift from disrupting alignment.
+                self.gene_attention = nn.Sequential(
+                    nn.Linear(n_genes, n_genes),
+                    nn.Sigmoid() # Scale expression up/down based on structural importance
+                )
+                
                 # Encoder with LayerNorm for training stability
                 self.enc = nn.Sequential(
                     nn.Linear(cond_dim, H * 2),
@@ -295,7 +305,9 @@ class INCENT_cVAE:
                             nn.init.zeros_(m.bias)
 
             def encode(self, x, label_oh):
-                h = self.enc(torch.cat([x, label_oh], dim=1))
+                # Apply biological structural attention to isolate lineage features
+                struct_x = x * self.gene_attention(x)
+                h = self.enc(torch.cat([struct_x, label_oh], dim=1))
                 # Clamp log_var to prevent exp() overflow
                 return self.mu(h), self.log_var(h).clamp(-4.0, 4.0)
 
@@ -542,6 +554,13 @@ class INCENT_cVAE:
                     contrastive = self._supervised_contrastive_loss(
                         z, ct_batch, source_batch, temperature=contrastive_temperature)
                     loss = loss + contrastive_loss_weight * contrastive
+
+                # Biological Prior: Structural Sparsity Penalty
+                # Encourage the model to rely only on a subset of genes (lineage/structural) 
+                # rather than using all transient/state genes.
+                attention_weights = model.gene_attention[0].weight
+                l1_penalty = torch.norm(attention_weights, p=1)
+                loss = loss + 1e-4 * l1_penalty
 
                 # Skip non-finite losses (do not backprop through NaN)
                 if not torch.isfinite(loss):
