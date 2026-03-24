@@ -779,9 +779,9 @@ def pairwise_align_seot(
     b_weighted /= b_weighted.sum()
 
     frac_in_region = float((w_filt > 0.5).mean())
-        print(f"[SEOTv2] Region prior: {frac_in_region*100:.1f}% of B cells "
-            f"in candidate regions (weight=1.0); boundary cells decay over radius={radius:.0f}")
-        log.write(f"Region prior: frac_in_region={frac_in_region:.3f}  radius={radius}\n")
+    print(f"[SEOTv2] Region prior: {frac_in_region*100:.1f}% of B cells "
+          f"in candidate regions (weight=1.0); boundary cells decay over radius={radius:.0f}")
+    log.write(f"Region prior: frac_in_region={frac_in_region:.3f}  radius={radius}\n")
 
     # Adjust R_init and t_init to account for the rough rotation already applied
     # (sliceA_rough has theta_init baked in; R_init from Procrustes is the
