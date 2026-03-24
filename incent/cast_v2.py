@@ -713,7 +713,7 @@ def pairwise_align_cast_v2(
                 coords_B_filt, phi, normalise=True, use_gpu=use_gpu)
             import ot
             alpha_fugw = (1.0 - alpha) / alpha if 1e-6 < alpha < 1 - 1e-6 else 1.0
-            pi_s, _, _ = ot.gromov.fused_unbalanced_gromov_wasserstein(
+            pi_s, _ = ot.gromov.fused_unbalanced_gromov_wasserstein(
                 Cx=D_A_np, Cy=D_B_np_cur,
                 wx=a_np, wy=b_np,
                 reg_marginals=(rho_A_use, rho_B_use),

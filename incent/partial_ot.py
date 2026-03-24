@@ -372,7 +372,7 @@ def iterative_overlap_fugw(
 
         # ── Solve FUGW ────────────────────────────────────────────────────
         try:
-            pi_new, _, _ = ot.gromov.fused_unbalanced_gromov_wasserstein(
+            pi_new, _ = ot.gromov.fused_unbalanced_gromov_wasserstein(
                 Cx=D_A_np,
                 Cy=D_B_np,
                 wx=a_rw,
